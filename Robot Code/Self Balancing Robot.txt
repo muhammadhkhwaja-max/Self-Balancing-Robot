@@ -1,0 +1,109 @@
+#include <Wire.h>
+#include <PID_v1.h>
+#include <LMotorController.h>
+
+#define MIN_ABS_SPEED 20
+
+unsigned long lastTime = 0;
+const int sampleTime = 10; 
+
+// Your new MPU-6050 physical balance point
+double originalSetpoint = -1.3; 
+double setpoint = originalSetpoint;
+double input, output;
+
+// FIXED: Ki must be 0 to stop it from running away.
+
+double Kp = 15;   
+double Kd = 0.60;
+double Ki = 130;
+PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+
+double motorSpeedFactorLeft = 0.9;
+double motorSpeedFactorRight = 0.9;
+
+int ENA = 11;
+int IN1 = 6;
+int IN2 = 7;
+int IN3 = 5;
+int IN4 = 4;
+int ENB = 10;
+LMotorController motorController(ENA, IN1, IN2, ENB, IN3, IN4, motorSpeedFactorLeft, motorSpeedFactorRight);
+
+void setup() {
+  Serial.begin(115200); 
+  Wire.begin();
+  delay(2000);
+
+  // Waking up the MPU-6050 directly
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B); 
+  Wire.write(0x00); 
+  Wire.endTransmission();
+  
+  pid.SetMode(AUTOMATIC);
+  pid.SetSampleTime(10);
+  
+  // FIXED: Must be 255 to give the motors enough power to save the robot from falling!
+  pid.SetOutputLimits(-150, 150); 
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastTime >= sampleTime) {
+    lastTime = currentTime;
+
+    // Request data from MPU-6050
+    Wire.beginTransmission(0x68);
+    Wire.write(0x3B); 
+    Wire.endTransmission(false);
+    
+    Wire.requestFrom(0x68, 14);
+    
+    if (Wire.available() >= 14) {
+      int16_t rawAccX = (Wire.read() << 8 | Wire.read());
+      int16_t rawAccY = (Wire.read() << 8 | Wire.read());
+      int16_t rawAccZ = (Wire.read() << 8 | Wire.read());
+      int16_t rawTemp = (Wire.read() << 8 | Wire.read()); 
+      int16_t rawGyroX = (Wire.read() << 8 | Wire.read());
+      int16_t rawGyroY = (Wire.read() << 8 | Wire.read());
+      int16_t rawGyroZ = (Wire.read() << 8 | Wire.read());
+
+      // 1. Get the noisy Accelerometer angle
+      double accelPitch = atan2(rawAccX, -rawAccZ) * 180.0 / M_PI;
+      
+      // 2. Get the Y-axis Gyro rotation
+      double gyroRate = rawGyroY / 131.0;
+
+      // 3. THE MAGIC COMPLEMENTARY FILTER
+      static double pitch; 
+      static bool isInitialized = false;
+      
+      if (!isInitialized) {
+        pitch = accelPitch;
+        isInitialized = true;
+      }
+
+      // Complementary filter
+      pitch = 0.98 * (pitch + gyroRate * 0.01) + 0.02 * accelPitch;
+      
+      input = pitch;
+      pid.Compute();
+
+      motorController.move(output, MIN_ABS_SPEED);
+
+      // FIXED: THESE MUST BE COMMENTED OUT! 
+      // Printing every 10ms creates massive lag and is exactly what causes the violent shaking!
+      /*
+      Serial.print(" rawAccX "); Serial.print(rawAccX);
+      Serial.print(" rawAccY"); Serial.print(rawAccY);
+      Serial.print(" rawAccZ "); Serial.print(rawAccZ);
+      Serial.print(" rawGyroX "); Serial.print(rawGyroX);
+      Serial.print(" rawGyroY "); Serial.print(rawGyroY);
+      Serial.print(" rawGyroZ "); Serial.print(rawGyroZ);
+      Serial.print(" pitch "); Serial.println(pitch);
+      */
+    }
+  }
+}
